@@ -1,0 +1,7 @@
+test_app:
+  image: python:3.14
+  stage: test
+  script:
+    - pip install uv        # Install uv on the runner
+    - uv sync               # Installs everything exactly as specified in uv.lock
+    - uv run pytest         # Runs our test_main.py
