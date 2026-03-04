@@ -1,11 +1,12 @@
+from fastapi.params import Depends
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import SQLModel, Session, create_engine, select
 from sqlmodel.pool import StaticPool
 import pytest
 from unittest.mock import patch
-
+from models import Job, ResultLog, AccessLog
 import main
-
+from datetime import datetime, UTC, timedelta
 # 1. Setup the blazing-fast in-memory test database
 sqlite_url = "sqlite:///:memory:"
 engine = create_engine(
@@ -35,18 +36,15 @@ def setup_db():
     SQLModel.metadata.drop_all(engine)  # Clean up after the test
 
 
-# --- The Tests ---
-
 def test_health_endpoint():
     response = client.get("/health")
     assert response.status_code == 200
 
 
-# We use @patch to instantly skip the 10-second sleep in our AI function
 @patch("main.time.sleep")
 def test_create_and_check_job(mock_sleep):
-    # 1. Test creating a new job
-    response1 = client.post("/jobs/?task_type=face_detection")
+
+    response1 = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.3.4"})
     assert response1.status_code == 200
 
     data = response1.json()
@@ -56,17 +54,46 @@ def test_create_and_check_job(mock_sleep):
 
     job_id = data["id"]
 
-    # 2. Test getting the job status
-    # Because TestClient runs background tasks instantly,
-    # the status will already be updated to COMPLETED!
     response2 = client.get(f"/jobs/{job_id}")
     assert response2.status_code == 200
 
     data2 = response2.json()
     assert data2["status"] == "COMPLETED"
     assert data2["result"] == '{"faces_detected": 2, "confidence": 0.98}'
-
+    with Session(engine) as session:
+        statement = select(ResultLog).where(ResultLog.job_id == job_id)
+        result_log = session.exec(statement).first()
+        assert result_log is not None
+        assert result_log.job_id == job_id
+        assert result_log.processing_time_ms >= 0
 
 def test_get_nonexistent_job():
     response = client.get("/jobs/fake-uuid-1234")
     assert response.status_code == 404
+
+
+def test_rate_limit_blocks_second_request():
+    # 1. First request should succeed
+    response1 = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.4.3"})
+    assert response1.status_code == 200
+
+    # 2. Second request from the same "IP" should fail
+    response2 = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.4.3"})
+    assert response2.status_code == 429
+    assert "Too many requests" in response2.json()["detail"]
+
+def test_rate_limit_jit():
+    past_time = (datetime.now(UTC) - timedelta(minutes=30, seconds=1)).replace(tzinfo=None)
+    old_log = AccessLog(ip_address="1.2.2.1", endpoint="/jobs/", created_at=past_time)
+    with Session(engine) as session:
+        session.add(old_log)
+        session.commit()
+    response = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.3.1"})
+    assert response.status_code == 200
+
+def test_malformed_ip():
+    malformed_ip_list = ["not-an-ip", "1.2.3.four", "1.3.5.512", "1.2.3.4.5.6"]
+    for ip in malformed_ip_list:
+        response = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": ip})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Bad IP Address"
