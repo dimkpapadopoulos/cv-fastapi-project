@@ -8,17 +8,16 @@ class Job(SQLModel, table=True):
     status: str = Field(default="PENDING")
     task_type: str
     result: Optional[str] = None
-    created_at: datetime = Field(default=datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 class AccessLog(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     ip_address: str
     endpoint: str
-    created_at: datetime = Field(default=datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 class ResultLog(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     job_id: str = Field(foreign_key="job.id")
     processing_time_ms: int
-    confidence_score: float
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

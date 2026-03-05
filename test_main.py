@@ -1,13 +1,15 @@
-from fastapi.params import Depends
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine, select
 from sqlmodel.pool import StaticPool
 import pytest
 from unittest.mock import patch
-from models import Job, ResultLog, AccessLog
+from models import ResultLog, AccessLog
 import main
 from datetime import datetime, UTC, timedelta
-# 1. Setup the blazing-fast in-memory test database
+from PIL import Image
+import io
+import tempfile
+
 sqlite_url = "sqlite:///:memory:"
 engine = create_engine(
     sqlite_url,
@@ -16,24 +18,37 @@ engine = create_engine(
 )
 
 main.engine = engine
-# 2. Create the dependency override
+
 def get_test_session():
     with Session(engine) as session:
         yield session
 
 
-# Tell FastAPI to swap the real database for the fake one during tests
 main.app.dependency_overrides[main.get_session] = get_test_session
 
 client = TestClient(main.app)
 
+@pytest.fixture(scope="session")
+def valid_image_bytes():
+    # Create a 100x100 solid red image in memory
+    img = Image.new('RGB', (100, 100), color='red')
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='JPEG')
+    return img_byte_arr.getvalue()
 
-# 3. Create the database tables before each test runs
+@pytest.fixture(autouse=True)
+def setup_test_uploads():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        original_upload_dir = main.UPLOAD_DIR
+        main.UPLOAD_DIR = tmpdir
+        yield
+        main.UPLOAD_DIR = original_upload_dir
+
 @pytest.fixture(autouse=True)
 def setup_db():
     SQLModel.metadata.create_all(engine)
-    yield  # The test runs here
-    SQLModel.metadata.drop_all(engine)  # Clean up after the test
+    yield
+    SQLModel.metadata.drop_all(engine)
 
 
 def test_health_endpoint():
@@ -42,13 +57,19 @@ def test_health_endpoint():
 
 
 @patch("main.time.sleep")
-def test_create_and_check_job(mock_sleep):
-
-    response1 = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.3.4"})
+def test_create_and_check_job(mockwait, valid_image_bytes):
+    form_data = {"task_type": "face_recognition"}
+    dummy_file = {"file": ("test_image.jpg", valid_image_bytes, "image/jpeg")}
+    response1 = client.post(
+        "/jobs/",
+        data=form_data,
+        files=dummy_file,
+        headers={"X-Forwarded-For": "1.2.3.4"}
+    )
     assert response1.status_code == 200
 
     data = response1.json()
-    assert data["task_type"] == "face_detection"
+    assert data["task_type"] == "face_recognition"
     assert data["status"] == "PENDING"
     assert "id" in data
 
@@ -59,7 +80,7 @@ def test_create_and_check_job(mock_sleep):
 
     data2 = response2.json()
     assert data2["status"] == "COMPLETED"
-    assert data2["result"] == '{"faces_detected": 2, "confidence": 0.98}'
+
     with Session(engine) as session:
         statement = select(ResultLog).where(ResultLog.job_id == job_id)
         result_log = session.exec(statement).first()
@@ -71,29 +92,56 @@ def test_get_nonexistent_job():
     response = client.get("/jobs/fake-uuid-1234")
     assert response.status_code == 404
 
+def test_rate_limit_blocks_immediate_second_request(valid_image_bytes):
+    form_data = {"task_type": "face_recognition"}
 
-def test_rate_limit_blocks_second_request():
-    # 1. First request should succeed
-    response1 = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.4.3"})
+    file1 = {"file": ("test.jpg", valid_image_bytes, "image/jpeg")}
+    response1 = client.post("/jobs/", data=form_data, files=file1, headers={"X-Forwarded-For": "10.0.0.1"})
     assert response1.status_code == 200
 
-    # 2. Second request from the same "IP" should fail
-    response2 = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.4.3"})
+    file2 = {"file": ("test.jpg", b"dummy content", "image/jpeg")}
+    response2 = client.post("/jobs/", data=form_data, files=file2, headers={"X-Forwarded-For": "10.0.0.1"})
     assert response2.status_code == 429
     assert "Too many requests" in response2.json()["detail"]
 
-def test_rate_limit_jit():
-    past_time = (datetime.now(UTC) - timedelta(minutes=30, seconds=1)).replace(tzinfo=None)
-    old_log = AccessLog(ip_address="1.2.2.1", endpoint="/jobs/", created_at=past_time)
+
+def test_rate_limit_blocks_just_before_cutoff(valid_image_bytes):
+
+    past_time = (datetime.now(UTC) - timedelta(minutes=2, seconds=59)).replace(tzinfo=None)
+    old_log = AccessLog(ip_address="10.0.0.2", endpoint="/jobs/", created_at=past_time)
+
     with Session(engine) as session:
         session.add(old_log)
         session.commit()
-    response = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": "1.2.3.1"})
+
+    form_data = {"task_type": "face_recognition"}
+    dummy_file = {"file": ("test.jpg", valid_image_bytes, "image/jpeg")}
+
+    response = client.post("/jobs/", data=form_data, files=dummy_file, headers={"X-Forwarded-For": "10.0.0.2"})
+    assert response.status_code == 429
+    assert "Too many requests" in response.json()["detail"]
+
+
+def test_rate_limit_allows_just_after_cutoff(valid_image_bytes):
+
+    past_time = (datetime.now(UTC) - timedelta(minutes=3, seconds=1)).replace(tzinfo=None)
+    old_log = AccessLog(ip_address="10.0.0.3", endpoint="/jobs/", created_at=past_time)
+
+    with Session(engine) as session:
+        session.add(old_log)
+        session.commit()
+
+    form_data = {"task_type": "face_recognition"}
+    dummy_file = {"file": ("test.jpg", valid_image_bytes, "image/jpeg")}
+
+    response = client.post("/jobs/", data=form_data, files=dummy_file, headers={"X-Forwarded-For": "10.0.0.3"})
     assert response.status_code == 200
 
-def test_malformed_ip():
+def test_malformed_ip(valid_image_bytes):
     malformed_ip_list = ["not-an-ip", "1.2.3.four", "1.3.5.512", "1.2.3.4.5.6"]
+    form_data = {"task_type": "face_recognition"}
     for ip in malformed_ip_list:
-        response = client.post("/jobs/?task_type=face_detection", headers={"X-Forwarded-For": ip})
+        dummy_file = {"file": ("test.jpg", valid_image_bytes, "image/jpeg")}
+        response = client.post("/jobs/", data=form_data, files=dummy_file, headers={"X-Forwarded-For": ip})
         assert response.status_code == 400
         assert response.json()["detail"] == "Bad IP Address"

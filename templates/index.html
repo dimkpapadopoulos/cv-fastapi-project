@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CV-FastAPI-Project</title>
+    <link rel="stylesheet" href="../static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Computer Vision Tasks</h1>
+        <div id="alert" class="alert"></div>
+        <form id="uploadForm" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="task_type">Select CV Task</label>
+                    <select id="task_type" name="task_type" required>
+                        <option value="" disabled selected>Choose a task...</option>
+                        <option value="face_recognition">Face Detection</option>
+                        <option value="segmentation">Image Segmentation</option>
+                    </select>
+            </div>
+            <div class="form-group">
+                <label>Upload Image</label>
+                <div class="file-drop-zone" id="dropZone">
+                    <p>Drag & drop you image or click to browse your files</p>
+                    <p style="color: #888; font-size: 0.9em; margin-top:10px;">
+                        Supported formats: JPG, PNG, WEBP (Max size: 10MB)
+                    </p>
+                    <input type="file" id="file" name="file" accept=".png,.jpg,.jpeg,.webp" required style="display: none;"/>
+                </div>
+                <img id="imagePreview" class="preview-image" alt="Image Preview">
+                <img id="resultPreview" class="preview-image" alt="Result Preview">
+            </div>
+            <button type="submit" class="btn" id="submitBtn">
+                Start processing
+            </button>
+        </form>
+        <div id="statusSection" class="status-section">
+            <h3 style="margin-bottom: 15px;">Job Status</h3>
+            <div class="status-item">
+                <span class="status-label">Job ID:</span>
+                <span class="status-value" id="jobId">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Task Type:</span>
+                <span class="status-value" id="taskType">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span class="status-value" id="jobStatus">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Created:</span>
+                <span class="status-value" id="createdAt">-</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div id="resultBox" class="result-box" style="display: none;"></div>
+        </div>
+    </div>
+    <script src="../static/app.js"></script>
+</body>
+</html>
